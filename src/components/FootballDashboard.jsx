@@ -14,6 +14,8 @@ function FootballDashboard() {
   const ws = useRef(null);
   const pitchRef = useRef(null);
   const matchInterval = useRef(null);
+  const reconnectAttempts = useRef(0);
+  const maxReconnectAttempts = 5;
 
   // Start match timer
   useEffect(() => {
@@ -25,58 +27,90 @@ function FootballDashboard() {
     return () => clearInterval(matchInterval.current);
   }, [connectionStatus]);
 
-  // Setup WebSocket connection
-  useEffect(() => {
+  // WebSocket connection management
+  const connectWebSocket = () => {
     ws.current = new WebSocket(WS_URL);
 
     ws.current.onopen = () => {
       console.log('WebSocket connected');
       setConnectionStatus('Connected');
+      reconnectAttempts.current = 0;
     };
 
     ws.current.onmessage = (message) => {
-      const data = JSON.parse(message.data);
-      if (data.type === 'player_positions') {
-        setPlayers(data.players);
-        setBall(data.ball);
-      } else if (data.type === 'event') {
-        const event = {
-          ...data.event,
-          id: Date.now() + Math.random(),
-          timestamp: matchTime
-        };
+      try {
+        const data = JSON.parse(message.data);
         
-        setEvents(prev => [...prev.slice(-3), event]);
-        setTimeline(prev => [...prev, event]);
+        if (!data) return;
         
-        // Update score for goals
-        if (event.type === 'goal') {
-          setScore(prev => {
-            const isHomeGoal = data.players.find(p => 
-              p.id === event.playerId
-            )?.team === 'home';
-            return {
-              home: isHomeGoal ? prev.home + 1 : prev.home,
-              away: isHomeGoal ? prev.away : prev.away + 1
-            };
-          });
+        if (data.type === 'player_positions') {
+          // Validate player positions data
+          if (Array.isArray(data.players)) {
+            setPlayers(data.players);
+          }
+          if (data.ball && typeof data.ball.x === 'number' && typeof data.ball.y === 'number') {
+            setBall(data.ball);
+          }
+        } 
+        else if (data.type === 'event') {
+          // Validate event data
+          if (!data.event) return;
+          
+          const event = {
+            ...data.event,
+            id: Date.now() + Math.random(),
+            timestamp: matchTime
+          };
+          
+          setEvents(prev => [...prev.slice(-3), event]);
+          setTimeline(prev => [...prev, event]);
+          
+          // Only process goal events if we have valid player data
+          if (event.type === 'goal' && Array.isArray(players)) {
+            setScore(prev => {
+              const scoringPlayer = players.find(p => p.id === event.playerId);
+              const isHomeGoal = scoringPlayer?.team === 'home';
+              
+              return {
+                home: isHomeGoal ? prev.home + 1 : prev.home,
+                away: isHomeGoal ? prev.away : prev.away + 1
+              };
+            });
+          }
         }
+      } catch (error) {
+        console.error('Error processing WebSocket message:', error);
       }
     };
 
-    ws.current.onclose = () => {
-      console.log('WebSocket disconnected');
+    ws.current.onclose = (e) => {
+      console.log('WebSocket closed:', e.code, e.reason);
       setConnectionStatus('Disconnected');
       clearInterval(matchInterval.current);
+      
+      // Attempt to reconnect if the closure was unexpected
+      if (e.code !== 1000 && reconnectAttempts.current < maxReconnectAttempts) {
+        reconnectAttempts.current += 1;
+        const delay = Math.min(1000 * reconnectAttempts.current, 5000);
+        console.log(`Attempting to reconnect in ${delay}ms (attempt ${reconnectAttempts.current})`);
+        setTimeout(connectWebSocket, delay);
+      }
     };
 
     ws.current.onerror = (error) => {
       console.error('WebSocket error:', error);
       setConnectionStatus('Error');
     };
+  };
+
+  // Setup WebSocket connection
+  useEffect(() => {
+    connectWebSocket();
 
     return () => {
-      ws.current.close();
+      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        ws.current.close(1000, 'Component unmounted');
+      }
       clearInterval(matchInterval.current);
     };
   }, []);
